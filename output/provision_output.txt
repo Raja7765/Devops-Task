@@ -1,0 +1,31 @@
+rajalingam@Sarveshraja:~/submission$ ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/playbooks/provision.yml -e "redis_version=7.0.15"
+
+PLAY [Provision Redis Cluster Nodes] **********************************************************
+
+TASK [Gathering Facts] ************************************************************************
+ok: [redis-node-1]
+ok: [redis-node-2]
+ok: [redis-node-3]
+ok: [redis-node-4]
+ok: [redis-node-5]
+ok: [redis-node-6]
+
+TASK [redis : Install build tools (C compiler)] ***********************************************
+changed: [redis-node-1]
+changed: [redis-node-2]
+...
+TASK [redis : Compile and Install Redis from source] ******************************************
+changed: [redis-node-1]
+changed: [redis-node-2]
+changed: [redis-node-3]
+changed: [redis-node-4]
+changed: [redis-node-5]
+changed: [redis-node-6]
+
+PLAY RECAP ************************************************************************************
+redis-node-1               : ok=8    changed=6    unreachable=0    failed=0    skipped=0   
+redis-node-2               : ok=8    changed=6    unreachable=0    failed=0    skipped=0   
+redis-node-3               : ok=8    changed=6    unreachable=0    failed=0    skipped=0   
+redis-node-4               : ok=8    changed=6    unreachable=0    failed=0    skipped=0   
+redis-node-5               : ok=8    changed=6    unreachable=0    failed=0    skipped=0   
+redis-node-6               : ok=8    changed=6    unreachable=0    failed=0    skipped=0

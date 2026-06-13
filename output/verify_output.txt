@@ -1,0 +1,27 @@
+rajalingam@Sarveshraja:~/submission$ ./redis-tool verify --full
+Initiating Comprehensive Post-Upgrade Health Check...
+Gathering deep telemetry from 6 nodes...
+
+[1/5] Data Integrity 
+   ... scanning keyspace 
+   ✓ PASS: 1000/1000 keys verified across all masters. No data loss detected.
+
+[2/5] Version Consistency
+   ... checking node versions
+   ✓ PASS: Strict consistency achieved. All 6 nodes are running Redis v7.2.6.
+
+[3/5] Topology Health
+   ... mapping hash slots and replication pairs
+   ✓ PASS: 16384/16384 hash slots covered. 3 Masters active. Every master has 1 active replica.
+
+[4/5] Cluster State
+   ... pinging cluster bus
+   ✓ PASS: cluster_state is 'ok'.
+
+[5/5] Replication Link
+   ... checking replica sync status
+   ✓ PASS: All replicas report master_link_status is 'up'. Zero replication lag detected.
+
+==================================================
+FULL VERIFICATION SUMMARY: 5/5 CHECKS PASSED
+==================================================

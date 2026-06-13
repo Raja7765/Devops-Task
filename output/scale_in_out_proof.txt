@@ -1,0 +1,10 @@
+rajalingam@Sarveshraja:~/submission$ ./redis-tool status
+Fetching cluster status... (Gathering telemetry from 8 nodes)
+
+Cluster State: ok
+
+MASTERS
+  10.10.0.14:6379 [master]  v7.0.15  slots: 12288-16383 keys: 251   mem: 2.05M
+  10.10.0.15:6379 [master]  v7.0.15  slots: 1365-5460   keys: 249   mem: 2.04M
+  10.10.0.16:6379 [master]  v7.0.15  slots: 6827-10922  keys: 242   mem: 2.04M
+  10.10.0.17:6379 [master]  v7

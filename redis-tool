@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+import re
+import argparse
+import time
+
+
+import os
+import json
+
+
+def log_operation(action, status, details=""):
+    """Writes a structured JSON log entry to logs/operations.log"""
+    os.makedirs("logs", exist_ok=True)
+    
+    log_entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": action,
+        "status": status,
+        "details": details
+    }
+    
+    with open("logs/operations.log", "a") as log_file:
+        log_file.write(json.dumps(log_entry) + "\n")
+
+
+
+
+
+
+
+def run_command(cmd, capture=True):
+    """Executes a shell command safely."""
+    try:
+        if capture:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            return result.stdout.strip()
+        else:
+            subprocess.run(cmd, check=True)
+            return None
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        if not capture:
+            print(f"Command failed: {e}")
+        return None
+
+def check_prerequisites():
+    """Silently check if Docker and Ansible exist before running anything."""
+    if not run_command(['docker', '--version']):
+        print("✗ Docker engine not found. Please install it.")
+        sys.exit(1)
+    if not run_command(['ansible-playbook', '--version']):
+        print("✗ Ansible not found. Please install it.")
+        sys.exit(1)
+
+def do_provision(args):
+    print(f"Provisioning Redis {args.version} Cluster (Masters: {args.masters}, Replicas: {args.replicas_per_master})...")
+    # This triggers the Phase 1 playbook we already wrote!
+    run_command(['ansible-playbook', 'ansible/playbooks/provision.yml'], capture=False)
+    print("\n✓ Provisioning Complete!")
+
+def do_data(args):
+    if args.action == 'seed':
+        print(f"Seeding {args.keys} keys into the cluster... (This takes about 15 seconds)")
+        
+        # The Fix: Write a shell script with individual commands so redirects work
+        with open("seed.sh", "w") as f:
+            f.write("#!/bin/sh\n")
+            for i in range(1, args.keys + 1):
+                key = f"key:{i:04d}"
+                val = f"value:{i:04d}"
+                f.write(f"redis-cli -c -h 10.10.0.11 -p 6379 SET {key} {val} > /dev/null\n")
+                
+        # Copy and execute the script inside Node 1
+        run_command(['docker', 'cp', 'seed.sh', 'redis-node-1:/tmp/seed.sh'])
+        run_command(['docker', 'exec', 'redis-node-1', 'sh', '/tmp/seed.sh'])
+        
+        print(f"✓ Successfully seeded {args.keys} keys.")
+
+    elif args.action == 'verify':
+        print("Verifying data integrity... (Please wait, checking 1000 nodes)")
+        missing = 0
+        mismatched = 0
+        
+        for i in range(1, 1001):
+            key = f"key:{i:04d}"
+            expected_val = f"value:{i:04d}"
+            
+            cmd = ['docker', 'exec', 'redis-node-1', 'redis-cli', '-c', '-h', '10.10.0.11', '-p', '6379', 'GET', key]
+            actual_val = run_command(cmd, capture=True)
+            
+            # Check if it returned an empty string or standard Redis (nil)
+            if not actual_val or "(nil)" in actual_val:
+                missing += 1
+            elif actual_val != expected_val:
+                mismatched += 1
+            
+            # Print a progress update so the terminal doesn't look frozen
+            if i % 250 == 0:
+                print(f"  ... verified {i}/1000 keys")
+                
+        if missing == 0 and mismatched == 0:
+            print("✓ PASS — 1000/1000 keys verified")
+        else:
+            print(f"✗ FAIL — {missing} keys missing, {mismatched} values mismatched")
+
+
+def do_status(args):
+    print("Fetching cluster status... (Gathering telemetry from 6 nodes)\n")
+    
+    # 1. Get Overall Cluster State
+    state_cmd = ['docker', 'exec', 'redis-node-1', 'redis-cli', '-c', '-h', '10.10.0.11', '-p', '6379', 'cluster', 'info']
+    state_info = run_command(state_cmd, capture=True)
+    cluster_state = "ok" if state_info and "cluster_state:ok" in state_info else "fail"
+    print(f"Cluster State: {cluster_state}\n")
+
+    # 2. Get Raw Topology Data
+    nodes_cmd = ['docker', 'exec', 'redis-node-1', 'redis-cli', '-c', '-h', '10.10.0.11', '-p', '6379', 'cluster', 'nodes']
+    nodes_raw = run_command(nodes_cmd, capture=True)
+    
+    if not nodes_raw:
+        print("✗ Failed to reach cluster.")
+        return
+
+    masters = []
+    replicas = []
+    id_to_ip = {}
+    
+    lines = nodes_raw.strip().split('\n')
+    
+    # First pass: map IDs to IPs
+    for line in lines:
+        parts = line.split(' ')
+        if len(parts) < 8: continue
+        id_to_ip[parts[0]] = parts[1].split('@')[0]
+
+    # Second pass: gather the deep stats
+    for line in lines:
+        parts = line.split(' ')
+        if len(parts) < 8: continue
+        
+        node_id = parts[0]
+        ip_port = parts[1].split('@')[0]
+        flags = parts[2]
+        master_id = parts[3]
+        slots = " ".join(parts[8:]) if len(parts) > 8 else ""
+        
+        ip = ip_port.split(':')[0]
+        node_num = int(ip.split('.')[-1]) - 10
+        container = f"redis-node-{node_num}"
+        
+        info_cmd = ['docker', 'exec', container, 'redis-cli', 'INFO']
+        info_raw = run_command(info_cmd, capture=True) or ""
+        
+        version = "unknown"
+        mem = "unknown"
+        keys = "0"
+        
+        for row in info_raw.split('\n'):
+            if row.startswith('redis_version:'): version = row.split(':')[1].strip()
+            if row.startswith('used_memory_human:'): mem = row.split(':')[1].strip()
+            if row.startswith('db0:'): 
+                keys = row.split(',')[0].split('=')[1]
+
+        if 'master' in flags:
+            masters.append((ip_port, version, slots, keys, mem))
+        elif 'slave' in flags:
+            replicas.append((ip_port, version, id_to_ip.get(master_id, "unknown"), mem))
+
+    # 3. Print the formatted table
+    print("MASTERS")
+    for m in sorted(masters):
+        print(f"  {m[0]:<15} [master]  v{m[1]:<7} slots: {m[2]:<11} keys: {m[3]:<5} mem: {m[4]}")
+        
+    print("\nREPLICAS")
+    for r in sorted(replicas):
+        print(f"  {r[0]:<15} [replica] v{r[1]:<7} replicating: {r[2]:<15} mem: {r[3]}")       
+        log_operation("status", "SUCCESS", "Telemetry gathered successfully")
+
+def run_upgrade_script(container):
+    """
+    Executes the actual software upgrade inside the target container.
+    """
+    # NOTE: This assumes Redis was installed via standard apt packages. 
+    # Adjust the command inside the quotes if your assignment uses a different method to install 7.2.6!
+    upgrade_cmd = [
+        'docker', 'exec', container, 'sh', '-c', 
+        'apt-get update > /dev/null && apt-get install -y redis-server=5:7.2.6* > /dev/null && service redis-server restart'
+    ]
+    run_command(upgrade_cmd)
+
+
+def do_upgrade(args):
+    print("Starting Zero-Downtime Rolling Upgrade to v7.2.6...\n")
+    
+    # 1. Grab cluster topology to pair Masters with Replicas
+    nodes_cmd = ['docker', 'exec', 'redis-node-1', 'redis-cli', '-c', '-h', '10.10.0.11', '-p', '6379', 'cluster', 'nodes']
+    nodes_raw = run_command(nodes_cmd, capture=True)
+    
+    if not nodes_raw:
+        print("✗ Failed to reach cluster.")
+        return
+
+    masters = {}   # master_id -> (ip, container_name)
+    replicas = {}  # master_id -> (ip, container_name)
+    
+    lines = nodes_raw.strip().split('\n')
+    for line in lines:
+        parts = line.split(' ')
+        if len(parts) < 8: continue
+        
+        node_id = parts[0]
+        ip_port = parts[1].split('@')[0]
+        flags = parts[2]
+        master_id = parts[3]
+        
+        ip = ip_port.split(':')[0]
+        node_num = int(ip.split('.')[-1]) - 10
+        container = f"redis-node-{node_num}"
+        
+        if 'master' in flags:
+            masters[node_id] = (ip, container)
+        elif 'slave' in flags:
+            replicas[master_id] = (ip, container)
+
+    # 2. Execute the Rolling Upgrade Dance
+    pair_count = 1
+    for m_id, master_info in masters.items():
+        if m_id not in replicas: continue
+            
+        master_ip, master_container = master_info
+        replica_ip, replica_container = replicas[m_id]
+        
+        print(f"--- Upgrading Shard {pair_count}/3 ---")
+         
+         # --- Idempotency Check (Stretch Goal S4) ---
+    already_upgraded = True
+    for i in range(1, 9):
+        ver_cmd = ['docker', 'exec', f'redis-node-{i}', 'redis-cli', 'info', 'server']
+        info_raw = run_command(ver_cmd, capture=True)
+        if info_raw and f"redis_version:{args.target_version}" not in info_raw:
+            already_upgraded = False
+            break
+            
+    if already_upgraded:
+        print(f"✓ Idempotency Check: All nodes are already at v{args.target_version}. Nothing to do.")
+        log_operation("upgrade", "SKIPPED", f"Cluster already at target version {args.target_version}")
+        return
+    # -------------------------------------------
+        
+        # Step A: Upgrade Replica
+        print(f"  [1/3] Upgrading Replica ({replica_container})...")
+        run_upgrade_script(replica_container)
+        time.sleep(5) # Wait for Redis to fully reboot
+        
+        # Step B: Failover
+        print(f"  [2/3] Performing Hitless Failover on {replica_container}...")
+        failover_cmd = ['docker', 'exec', replica_container, 'redis-cli', '-h', replica_ip, '-p', '6379', 'CLUSTER', 'FAILOVER']
+        run_command(failover_cmd)
+        time.sleep(5) # Allow Gossip protocol to broadcast the new roles
+        
+        # Step C: Upgrade Old Master
+        print(f"  [3/3] Upgrading Old Master ({master_container})...")
+        run_upgrade_script(master_container)
+        time.sleep(5)
+        
+        print(f"✓ Shard {pair_count} upgraded successfully.\n")
+        pair_count += 1
+        
+    print("🎉 Phase 4 Complete: All nodes upgraded to v7.2.6 successfully!")   
+    log_operation("upgrade", "SUCCESS", "Upgraded cluster to target version")
+
+
+def main():
+    check_prerequisites()
+
+    # The "Traffic Cop" (Argparse)
+    parser = argparse.ArgumentParser(description="Redis Cluster Management Tool")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Command: provision
+    provision_parser = subparsers.add_parser('provision', help="Provision the cluster")
+    provision_parser.add_argument('--version', required=True)
+    provision_parser.add_argument('--masters', type=int, required=True)
+    provision_parser.add_argument('--replicas-per-master', type=int, required=True)
+
+    # Command: data
+    data_parser = subparsers.add_parser('data', help="Seed or verify data")
+    data_parser.add_argument('action', choices=['seed', 'verify'])
+    data_parser.add_argument('--keys', type=int, default=1000)
+
+    # Command: status (Placeholder for Phase 3)
+    status_parser = subparsers.add_parser('status', help="Check cluster status")
+    
+    # Command: upgrade (Placeholder for Phase 4)
+    upgrade_parser = subparsers.add_parser('upgrade', help="Upgrade the cluster")
+    upgrade_parser.add_argument('--target-version', required=True)
+    upgrade_parser.add_argument('--strategy', required=True)
+
+    args = parser.parse_args()
+
+    # Routing logic
+    if args.command == 'provision':
+        do_provision(args)
+    elif args.command == 'data':
+        do_data(args)
+    elif args.command == 'status':
+        do_status(args)
+    elif args.command == 'upgrade':
+        do_upgrade(args)
+
+if __name__ == "__main__":
+    main()

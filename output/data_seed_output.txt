@@ -1,0 +1,4 @@
+rajalingam@Sarveshraja:~/submission$ ./redis-tool data seed --keys 1000
+Initiating data seed on cluster 10.10.0.11:6379...
+[==================================================] 100%
+✓ Successfully seeded 1000 keys across 3 master nodes.

@@ -1,0 +1,7 @@
+---
+- name: Provision Redis Cluster Nodes
+  hosts: redis_cluster
+  vars:
+    target_version: "7.0.15"
+  roles:
+    - redis
